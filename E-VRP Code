@@ -1,0 +1,2275 @@
+import openpyxl
+import numpy as np
+import copy
+import pulp
+import time
+from numpy.random import choice
+import pandas
+import random
+import math
+max_non_improving_iteration_parameter = 1000
+
+
+def calculateteta_it():
+    difference = []
+    for list1_i, list2_i in zip(b_j, a_j):
+        difference.append(list1_i - list2_i)
+        dif_total = sum(difference)
+    numerator = [dif_total / (a_j[i] - b_j[i]) for i in range(Job)]
+    denominator = sum(numerator)
+    return [i / denominator for i in numerator]
+
+
+def calculate_id():
+    teta_id = [i / sum(dur) for i in dur]
+    return teta_id
+
+
+def calculateteta_ic():
+    sum_of_jobskill = [[] for i in range(Job)]
+    for i in range(Job):
+        sum_of_jobskill[i] = sum(q_j[i])
+    teta_ic = [i / sum(sum_of_jobskill) for i in sum_of_jobskill]
+    return teta_ic
+
+
+def calculatelambda_j():
+    zipped_list = zip(teta_ic, teta_id, teta_it)
+    lambda_j = [sum(item) for item in zipped_list]
+    return lambda_j
+
+
+def calculateteta_nt():
+    difference = []
+    for list1_i, list2_i in zip(b_n, a_n):
+        difference.append(list1_i - list2_i)
+        dif_total = sum(difference)
+    teta_nt = [(b_n[i] - a_n[i]) / dif_total for i in range(Nurse)]
+    return teta_nt
+
+
+def calculateteta_nc():
+    sum_of_nurseskill = [[] for i in range(Nurse)]
+    for i in range(Nurse):
+        sum_of_nurseskill[i] = sum(q_n[i])
+    teta_nc = [i / sum(sum_of_nurseskill) for i in sum_of_nurseskill]
+    return teta_nc
+
+
+def calculateteta_nf():
+    teta_nf = [1 - (i / sum(fixed_cost)) for i in fixed_cost]
+    return teta_nf
+
+
+def calculatelambda_n():
+    zipped_list = zip([teta_nt_coefficient * i for i in teta_nt],
+                      [teta_nc_coefficient * i for i in teta_nc],
+                      [teta_nf_coefficient * i for i in teta_nf])
+    lambda_n = [sum(item) for item in zipped_list]
+
+    return lambda_n
+
+
+def calculate_compatibility():
+    for n in range(Nurse):
+        for j in range(Job):
+            for sk in range(number_of_skill_set):
+                if q_n[n][sk] >= q_j[j][sk]:
+                    constraint[n][j] += 1
+
+    compatibility_nj = np.zeros((Nurse, Job))
+    for n in range(Nurse):
+        for i in range(Job):
+            if ((a_n[n] <= a_j[i]) or (b_n[n] >= b_j[i])) and constraint[n][i] == number_of_skill_set:
+                compatibility_nj[n][i] = lambda_n[n]
+            else:
+                compatibility_nj[n][i] = 0
+    compatibility_nj = compatibility_nj.transpose()
+
+    return compatibility_nj
+
+
+def calculate_compatibility_probability():
+    for loclist, liste in enumerate(compatibility):
+        for locj, j in enumerate(liste):
+            if sum(liste) > 0:
+                compatibility_prob[loclist][locj] = float(j) / sum(liste)
+            else:
+                compatibility_prob[loclist][locj] = 0
+
+    return compatibility_prob
+
+
+def assign_jobs():  # assign jobs to nurses ###################Düzenlenecek#################
+    unassigned_job = [i for i in range(Job)]  # atanmamış işler
+    is_job_assigned = [0 for i in range(Job)]
+    nurse_number = ["-" for i in range(Job)]  # iş için atanan hemşire numarası
+
+    for i in unassigned_job:
+        for j in unassigned_job:
+            if is_job_assigned[i] == 0 and is_job_assigned[j] == 0 and p_jk[i][
+                j] == 1:  # assign synchronized jobs
+                t = int(choice(range(1, 1 + Nurse), 1, p=compatibility_prob[i]))
+                nurse_number[i] = t
+                k = t
+                while (k == t):  # choice different number from t
+                    k = int(choice(range(1, 1 + Nurse), 1, p=compatibility_prob[i]))
+                nurse_number[j] = k
+                p_jk[i][j] = 0
+                p_jk[j][i] = 0
+                is_job_assigned[i] = 1
+                is_job_assigned[j] = 1
+
+    for i in range(Job):
+        if is_job_assigned[i] == 1:
+            unassigned_job.remove(i)
+
+    for i in unassigned_job:  # assign non-synchronized jobs
+        t = int(choice(range(1, 1 + Nurse), 1, p=compatibility_prob[i]))
+        nurse_number[i] = t
+    nurse_job_matrix = [[0 for i in range(Job)] for n in range(Nurse)]
+    for loci in range(Nurse):
+        for locj in range(Job):
+            if nurse_number[locj] == loci + 1:
+                nurse_job_matrix[loci][locj] = 1
+            else:
+                nurse_job_matrix[loci][locj] = 0
+    unassigned_job.clear()
+
+    return nurse_job_matrix
+
+
+def assign_nurses(nurse_job_matrix):  # assign random nurses to random vehicles.
+    vehicles = [i for i in range(K)]
+    nurses = [i for i in range(Nurse)]
+    number_of_jobs = [sum(nurse_job_matrix[n]) for n in
+                      range(Nurse)]  # hemşirenin toplam iş sayısı tutulur.
+    sorted_nurse = sorted(nurses, reverse=True,
+                          key=lambda nurses: number_of_jobs[
+                              nurses])  # iş sayısına göre hemşireler sıralanır.
+    assigned_jobs_vehicle = [[0 for i in range(Job)] for j in range(K)]
+    assigned_nurses = [[0 for k in range(K)] for n in range(Nurse)]
+    vehicle_situation = ["bos" for k in range(K)]
+    while len(sorted_nurse) > 0:  # hemşireler iş sayılarına göre sırasıyla atanır.
+        k = int(choice(list(vehicles),
+                       p=assignment_prob))  # yüksek kapasiteli aracın olasılığı da yüksek olacak şekilde rastgele seçilir.
+        if vehicle_situation[k] == "bos":
+            n = sorted_nurse[0]
+            sorted_nurse.remove(n)
+            vehicle_situation[k] = "dolu"
+            assigned_nurses[n][k] = 1
+    for k in range(K):  # hemşiredeki işleri araca atar.
+        for n in range(Nurse):
+            if assigned_nurses[n][k] == 1:
+                assigned_jobs_vehicle[k] = nurse_job_matrix[n]
+    ARAC_LİST = [i for i in range(K)]
+    sorted_list = sorted(ARAC_LİST, reverse=True, key=lambda ARAC_LİST: sum(
+        assigned_jobs_vehicle[ARAC_LİST]))  # araçlar iş sayısına göre sıralanır.
+    return assigned_nurses, assigned_jobs_vehicle, sorted_list
+
+
+def Tour_construct(Tour):  # Construct tour of vehicle
+    CS_number_in_tour = len(S)
+    Tour = Tour
+    if sum(assigned_jobs_vehicle[vehicle]) or len(Tour[vehicle]) >= 1:
+        Tour[vehicle].append(vehicle + 1)  # add starting depot
+        for loci, i in enumerate(assigned_jobs_vehicle[vehicle]):  # -1 is due to indexing
+            if i == 1:
+                Tour[vehicle].append(K + loci + 1)  # add all the assigned jobs
+        Tour[vehicle] = Tour[vehicle] + S  # add CS_set
+        Tour[vehicle].append(K + Job + CS + vehicle + 1)  # add ending depot
+        Tour[vehicle].sort()
+        Job_number_in_tour = len(Tour[vehicle]) - 2 - len(S)
+
+        V[vehicle] = [Tour[vehicle][i] for i in
+                      range(1, CS_number_in_tour + Job_number_in_tour + 1)]  # Jobs+CSs
+        V_0[vehicle] = [Tour[vehicle][i] for i in
+                        range(0, CS_number_in_tour + Job_number_in_tour + 1)]  # Jobs+CSs+starting depot
+        V_N[vehicle] = [Tour[vehicle][i] for i in
+                        range(1, 1 + CS_number_in_tour + Job_number_in_tour + 1)]  # Jobs+CSs+ending depot
+        J[vehicle] = [Tour[vehicle][i] for i in range(1, Job_number_in_tour + 1)]  # Jobs
+        J_0[vehicle] = [Tour[vehicle][i] for i in range(0, 1 + Job_number_in_tour)]  # Jobs+starting depot
+        N[vehicle] = Tour[vehicle]  # all nodes that can be visited
+    return [Tour, N, V, V_0, V_N, J, J_0]
+
+
+def Solve_TSP(Tour, N, V_N, V_0, V, J, J_0, S):
+    zero_data = np.zeros(shape=(D + Job + CS + D, D + Job + CS + D))
+    x_var_model = pandas.DataFrame(index=list(range(1, 1 + D + Job + CS + D)),
+                                   columns=list(range(1, 1 + D + Job + CS + D)), data=zero_data)
+    Tour = Tour
+    N = N
+    V_N = V_N
+    V_0 = V_0
+    V = V
+    J = J
+    J_0 = J_0
+    S = S
+    for n in range(Nurse):  # araçla hangi hemşire yola çıkıyor
+        if assigned_nurses[n][vehicle] == 1:
+            nurse = n
+    if len(N[vehicle]) > 0:
+        model = pulp.LpProblem('tsp', pulp.LpMinimize)
+        # define variables
+        x = pulp.LpVariable.dicts("x", ((i, j) for i in N[vehicle]
+                                        for j in N[vehicle]),
+                                  cat='Binary')  # X_i_j
+        t = pulp.LpVariable.dicts("t", (i for i in N[vehicle]),
+                                  lowBound=a_n[nurse], upBound=b_n[nurse],
+                                  cat='Continuous')  # t_i time variable
+        A = pulp.LpVariable.dicts("A", (j for j in J[vehicle]),
+                                  cat='Binary')  # jobs is done or not
+        y = pulp.LpVariable.dicts("y", (i for i in N[vehicle]), lowBound=0,
+                                  cat='Continuous')  # State of charge variable
+        g_i = pulp.LpVariable.dicts("g", (i for i in S), lowBound=0,
+                                    cat='Continuous')  # State of charge at departure of CS
+        q_i = pulp.LpVariable.dicts("q", (i for i in S), lowBound=0,
+                                    cat='Continuous')  # amount of charge
+        w_i = pulp.LpVariable.dicts("w", (i for i in S), lowBound=0,
+                                    cat='Continuous')  # time required for charge
+        # =============================================================================
+        # set objective
+        model += pulp.lpSum(distance[i - 1][j - 1] * x[i, j] * cons_rate[vehicle] * 3 for i in N[vehicle]
+                            for j in (N[vehicle])) + pulp.lpSum(
+            penalty[j - D - 1] * (1 - A[j]) for j in J[vehicle]) + fixed_cost[
+                     nurse]  # total distance and penalty cost is minimized
+        # constraints
+        for i in J[vehicle]:
+            model += pulp.lpSum(x[i, j] for j in V_N[vehicle]) <= 1  # (1)
+
+        model += pulp.lpSum(x[i, j] for i in S for j in V_N[vehicle]) <= 1  # (2)
+        for i in S:
+            model += pulp.lpSum(x[i, j] for j in S) == 0
+        for j in V[vehicle]:
+            model += pulp.lpSum(x[i, j] for i in V_0[vehicle]) == pulp.lpSum(
+                x[j, i] for i in V_N[vehicle])  # (3)
+        for j in J[vehicle]:
+            model += t[j] <= b_j[j - D - 1]  # (4)
+            model += a_j[j - D - 1] <= t[j]
+        for j in N[vehicle]:  # redundant - lowbound-upbound eklendi
+            model += a_n[nurse] <= t[j] <= b_n[nurse]  # (5)
+        for i in J_0[vehicle]:
+            for j in V_N[vehicle]:
+                model += t[i] + (s_i_j[i - 1][j - 1] + dur[i - 1]) * x[i, j] <= t[j] + b_n[nurse] * (
+                        1 - x[i, j])  # (6)
+        for i in S:
+            for j in V_N[vehicle]:
+                model += t[i] + s_i_j[i - 1][j - 1] * x[i, j] + w_i[i] <= t[j] + (
+                        b_n[nurse] + r * Y[vehicle]) * (
+                                 1 - x[i, j])  # (7)
+        for i in J[vehicle]:
+            for j in V[vehicle]:
+                model += y[j] <= y[i] - distance[i - 1][j - 1] * cons_rate[vehicle] * x[i, j] + Y[
+                    vehicle] * (
+                                 1 - x[i, j])  # (8-a)
+        for j in J[vehicle]:
+            model += y[vehicle + 1 + Job + CS + D] <= y[j] - distance[j - 1][vehicle + Job + CS + D] * \
+                     cons_rate[
+                         vehicle] * x[j, vehicle + 1 + Job + CS + D] + Y[vehicle] * (
+                             1 - x[j, vehicle + 1 + Job + CS + D])  # (8-b)
+        for j in V[vehicle]:
+            model += y[j] <= y[vehicle + 1] - distance[vehicle][j - 1] * cons_rate[vehicle] * x[
+                vehicle + 1, j] + Y[vehicle] * (1 - x[vehicle + 1, j])  # (8-c)
+        for i in S:
+            for j in V_N[vehicle]:
+                model += y[j] <= g_i[i] - distance[i - 1][j - 1] * cons_rate[vehicle] * x[i, j] + Y[
+                    vehicle] * (
+                                 1 - x[i, j])  # (9)
+        for i in N[vehicle]:
+            model += y[i] >= 0
+        for i in S:
+            model += y[i] <= g_i[i] <= Y[vehicle]  # (10)
+            model += g_i[i] - y[i] == q_i[i]  # (11)
+            model += r * w_i[i] == q_i[i]  # (12)
+        model += y[vehicle + 1] == Y[vehicle]  # (13)
+        for i in S:
+            model += pulp.lpSum(x[i, j] * Y[vehicle] for j in V_N[vehicle]) >= q_i[i]  # (14)
+
+        for i in J[vehicle]:
+            if synchronized_jobs_time[i - D - 1] > 0:
+                model += t[i] == synchronized_jobs_time[i - D - 1]  # (15)
+
+        for j in J[vehicle]:
+            model += pulp.lpSum(x[i, j] for i in V_0[vehicle]) == A[j]  # (16)
+        model += pulp.lpSum(x[vehicle + 1, j] for j in V_N[vehicle]) <= 1  # (17)"""
+        # solve
+        path_to_cplex = r'C:\Program Files\IBM\ILOG\CPLEX_Studio1262\cplex\bin\x64_win64\cplex.exe'
+        solver = pulp.CPLEX_CMD(path=path_to_cplex, timeLimit=3
+                                )
+        status = model.solve(solver)
+        rota_olusturuldu_mu[vehicle] = "evet"
+        for n in range(Nurse):
+            if assigned_nurses[n][vehicle] == 1:
+                rota_olusturuldu_mu_hemsire[n] = "evet"
+        try:
+            for i in J[vehicle]:
+                for j in range(Job):
+                    if p_jj[i - D - 1][j] == 1 and A[i].varValue > 0:
+                        synchronized_jobs_time[j] = t[i].varValue
+            for i in V_0[vehicle]:
+                for j in V_N[vehicle]:
+                    if x[i, j].varValue > 0.9999999:
+                        x_var_model[j][i] = 1
+            x_var_iteration[vehicle] = x_var_model
+
+            Itertion_objective.append(pulp.value(model.objective))
+            for v in model.variables():
+                if v.varValue > 0:
+                    TSP_solution[vehicle].append("{} {} {}".format(v.name, "=", v.varValue))
+            undone_jobs.clear()
+            for i in J[vehicle]:
+                if A[i].varValue == 0:
+                    undone_jobs.append(i)
+                    undone_jobs_iteration.append(i)
+            undone_jobs.sort()
+            for i in undone_jobs:
+                N[vehicle].remove(i)
+                V[vehicle].remove(i)
+                V_0[vehicle].remove(i)
+                V_N[vehicle].remove(i)
+                J[vehicle].remove(i)
+                J_0[vehicle].remove(i)
+
+            number_of_undone_jobs = len(undone_jobs)
+            compatibility_new = pandas.DataFrame(compatibility)
+            compatibility_new = compatibility_new.iloc[
+                [(i - D - 1) for i in undone_jobs], [i for i in range(Nurse)]]
+            for n in range(Nurse):
+                if rota_olusturuldu_mu_hemsire[n] == "evet":
+                    for i in range(Job):
+                        compatibility_new[n][i] = 0
+            compatibility_new = compatibility_new.values.tolist()
+            compatibility_prob_new = np.zeros((number_of_undone_jobs, Nurse))
+            for loclist, liste in enumerate(compatibility_new):
+                for locj, j in enumerate(liste):
+                    if sum(liste) > 0:
+                        compatibility_prob_new[loclist][locj] = float(j) / sum(liste)
+                    else:
+                        compatibility_prob_new[loclist][locj] = 0
+            nurse_number = ["-" for i in range(number_of_undone_jobs)]  # iş için atanan hemşire numarası
+            assigned_jobs_vehicle_new = [[0 for i in range(Job)] for j in
+                                         range(K)]  # hemşireye atanan işler tutulur. Atandıysa 1
+            is_atanabilir_mi = [1 for i in range(number_of_undone_jobs)]
+            for loci, i in enumerate(undone_jobs):
+                for j in range(Job):
+                    if p_jj[i - D - 1][j] == 1:
+                        is_atanabilir_mi[loci] = 0
+
+            for i in range(number_of_undone_jobs):  # assign non-synchronized jobs
+                if is_atanabilir_mi[i] == 1:
+                    if sum(compatibility_prob_new[i]) == 1:
+                        t = int(choice(range(1, 1 + Nurse), 1, p=compatibility_prob_new[i]))
+                        nurse_number[i] = t
+                        undone_jobs_iteration.remove(undone_jobs[i])
+                        Itertion_objective.append(-800)
+
+            nurse_job_matrix_new = np.zeros((Nurse, number_of_undone_jobs), dtype=int)
+
+            for i in range(Nurse):
+                for j in range(number_of_undone_jobs):
+                    if nurse_number[j] == i + 1:
+                        nurse_job_matrix_new[i][j] = 1
+                    else:
+                        nurse_job_matrix_new[i][j] = 0
+
+            for k in range(K):  # hemşiredeki işleri araca atar.
+                for n in range(Nurse):
+                    if assigned_nurses[n][k] == 1:
+                        assigned_jobs_vehicle_new[k] = nurse_job_matrix_new[n]
+            assigned_jobs_new = [[] for n in range(Nurse)]
+            for k in range(K):
+                for i in range(number_of_undone_jobs):
+                    if assigned_jobs_vehicle_new[k][i] == 1:
+                        assigned_jobs_new[k].append(undone_jobs[i])
+
+            for k in range(K):
+                for i in assigned_jobs_new[k]:
+                    Tour[k].append(i)
+
+        except TypeError:
+            Itertion_objective.append(100000000000)
+
+    else:
+        rota_olusturuldu_mu[vehicle] = "evet"
+        for n in range(Nurse):
+            if assigned_nurses[n][vehicle] == 1:
+                rota_olusturuldu_mu_hemsire[n] = "evet"
+        x_var_iteration[vehicle] = x_var_model
+    return [TSP_solution, Tour, rota_olusturuldu_mu, rota_olusturuldu_mu_hemsire, Itertion_objective]
+
+
+def calculate_cost(initial_tour, nurse_assignment):
+    penalty_cost = 0
+    distance_cost = 0
+    fixed_nurse_cost = 0
+    done_jobs = []
+    undone_jobs1 = []
+    nurse_assignment1 = nurse_assignment
+    for k in range(K):
+        Tourr = initial_tour[k]
+
+        if len(Tourr) > 1:
+            Tour_without_depot = copy.deepcopy(Tourr)
+            Tour_without_depot.pop()
+
+            for loci, i in enumerate(Tour_without_depot):
+                j = Tourr[loci + 1]
+                distance_cost += distance[i - 1][j - 1] * cons_rate[k] * 3
+
+    for i in range(D + 1, D + Job + 1):
+        for k in range(K):
+            if i in initial_tour[k]:
+                done_jobs.append(i)
+
+    for i in range(D + 1, D + Job + 1):
+        if i not in done_jobs:
+            undone_jobs1.append(i)
+
+    for i in range(1, 1 + D + Job + CS + D):
+        if i in undone_jobs1:
+            penalty_cost += penalty[i - D - 1]
+
+    for n in range(Nurse):
+        for k in range(K):
+            if nurse_assignment1[n][k] == 1 and len(initial_tour[k]) > 1:
+                fixed_nurse_cost += fixed_cost[n]
+    total_cost = fixed_nurse_cost + distance_cost + penalty_cost
+    return total_cost
+
+
+def calculate_battery(Tour):  # turun şarj durumunu hesaplar. Infeasible ise feasible yapmaya çalışır
+    charging_time = [[0 for i in range(CS)] for m in range(K)]
+    arrival_battery = [[] for m in range(K)]
+    amount_of_required_charge = [0 for k in range(K)]
+    for k in range(K):
+        Tourr = Tour[k]
+        Tourr_without_cs = [i for i in Tourr if i < D + Job + 1 or i > D + Job + CS]
+        if len(Tourr_without_cs) == 2:
+            Tour[k].clear()
+        elif len(Tourr_without_cs) > 2:
+            amount_of_required_charge[k] = calculate_amount_of_required_charge(Tourr_without_cs, k)
+            if amount_of_required_charge[k] > 0:
+                possible_routes = find_best_station(Tourr_without_cs, k)
+                possible_tour = possible_routes[0]
+                index = possible_routes[1]
+                for i in index:
+                    amount_of_required_charge[k] = calculate_amount_of_required_charge(possible_tour[i], k)
+                    check = check_charge_feasibility(possible_tour[i], amount_of_required_charge[k], k)
+                    if check == True:
+                        Tour[k] = possible_tour[i]
+                        break
+            else:
+                Tour[k] = copy.deepcopy(Tourr_without_cs)
+    for k in range(K):
+        Tourr = copy.deepcopy(Tour[k])
+        if len(Tourr) > 1:  # eğer turda iş var ise şarj miktarını hesapla
+            Tour_without_depot = copy.deepcopy(Tourr)
+            Tour_without_depot.pop()
+            current_battery = Y[k]
+            arrival_battery[k].append(current_battery)
+            for loci, i in enumerate(Tour_without_depot):
+                j = Tourr[loci + 1]
+                current_battery -= distance[i - 1][j - 1] * cons_rate[k]  # mevcut şarjı her adımda güncelle
+                arrival_battery[k].append(current_battery)
+                if current_battery < -0.001:  # eğer i'den j'ye giderken şarj biterse false dön
+                    return False
+                if D + Job < j < D + Job + CS + 1:  # eğer şarj istasyonuna geldiyse şarj ol
+                    current_battery += amount_of_required_charge[k]
+                    charging_time[k][j - D - Job - 1] = amount_of_required_charge[k] / r
+                    amount_of_required_charge[k] = 0
+                if current_battery > Y[k] + 0.001:
+                    return False
+    return [charging_time, Tour]
+
+
+def find_best_station(Tourr_without_cs, k):
+    possible_tour = []
+    possible_cost = []
+    for i in range(1, len(Tourr_without_cs)):
+        for j in range(D + Job + 1, D + Job + CS + 1):
+            x = copy.deepcopy(Tourr_without_cs)
+            x.insert(i, j)
+            possible_tour.append(x)
+    for i in possible_tour:
+        Tour_without_depot = copy.deepcopy(i)
+        Tour_without_depot.pop()
+        cost = 0
+        for loci, x in enumerate(Tour_without_depot):
+            j = i[loci + 1]
+            cost += distance[x - 1][j - 1] * cons_rate[k] * 3
+        possible_cost.append(cost)
+    index = sorted(range(len(possible_tour)), reverse=True, key=lambda i: possible_cost[i])
+    possible_cost.sort(reverse=True)
+    index.reverse()
+    return possible_tour, index
+
+
+def check_charge_feasibility(Tour, amount_of_required_charge, k):
+    arrival_battery = []
+    Tour_without_depot = copy.deepcopy(Tour)
+    Tour_without_depot.pop()
+    current_battery = Y[k]
+    arrival_battery.append(current_battery)
+    for loci, i in enumerate(Tour_without_depot):
+        j = Tour[loci + 1]
+        current_battery -= distance[i - 1][j - 1] * cons_rate[k]  # mevcut şarjı her adımda güncelle
+        arrival_battery.append(current_battery)
+        if current_battery < -0.001:  # eğer i'den j'ye giderken şarj biterse false dön
+            return False
+        if D + Job < j < D + Job + CS + 1:  # eğer şarj istasyonuna geldiyse şarj ol
+            current_battery += amount_of_required_charge
+            amount_of_required_charge = 0
+            if current_battery > Y[k] + 0.001:
+                return False
+    return True
+
+
+def calculate_amount_of_required_charge(Tour, k):
+    Tour_without_depot = copy.deepcopy(Tour)
+    Tour_without_depot.pop()
+    total_required_battery_in_route = 0
+    for loci, i in enumerate(Tour_without_depot):  # yeni rota için gerekli şarj miktarını bul
+        j = Tour[loci + 1]
+        total_required_battery_in_route += distance[i - 1][j - 1] * cons_rate[k]
+    if total_required_battery_in_route - Y[k] > 0:
+        amount_of_required_charge = total_required_battery_in_route - Y[k]
+        return amount_of_required_charge
+    else:
+        return 0
+
+
+def calculate_cost_final(initial_tour, nurse_assignment):
+    penalty_cost = 0
+    distance_cost = 0
+    fixed_nurse_cost = 0
+    number_of_vehicle = 0
+    done_jobs = []
+    undone_jobs1 = []
+    nurse_assignment1 = nurse_assignment
+    for k in range(K):
+        Tourr = initial_tour[k]
+
+        if len(Tourr) > 1:
+            Tour_without_depot = copy.deepcopy(Tourr)
+            Tour_without_depot.pop()
+
+            for loci, i in enumerate(Tour_without_depot):
+                j = Tourr[loci + 1]
+                distance_cost += distance[i - 1][j - 1] * cons_rate[k] * 3
+
+    for i in range(D + 1, D + Job + 1):
+        for k in range(K):
+            if i in initial_tour[k]:
+                done_jobs.append(i)
+
+    for i in range(D + 1, D + Job + 1):
+        if i not in done_jobs:
+            undone_jobs1.append(i)
+
+    for i in range(1, 1 + D + Job + CS + D):
+        if i in undone_jobs1:
+            penalty_cost += penalty[i - D - 1]
+
+    for n in range(Nurse):
+        for k in range(K):
+            if nurse_assignment1[n][k] == 1 and len(initial_tour[k]) > 1:
+                fixed_nurse_cost += fixed_cost[n]
+                number_of_vehicle += 1
+    sheet1.cell(17, 1).value = "Fixed Nurse Cost"
+    sheet1.cell(17, 2).value = str(fixed_nurse_cost)
+    sheet1.cell(18, 1).value = "Travelling Cost"
+    sheet1.cell(18, 2).value = str(distance_cost)
+    sheet1.cell(19, 1).value = "Penalty Cost"
+    sheet1.cell(19, 2).value = str(penalty_cost)
+    sheet1.cell(20, 1).value = "Number of Vehicle"
+    sheet1.cell(20, 2).value = str(number_of_vehicle)
+    sheet1.cell(21, 1).value = "Number of Unserved Jobs"
+    sheet1.cell(21, 2).value = str(len(undone_jobs1))
+    total_cost = fixed_nurse_cost + distance_cost + penalty_cost
+    return total_cost
+
+
+def calculate_time(charging_time, Tour):
+    arrival_time = [[] for k in range(K)]
+    spare_time = [0 for k in range(K)]
+    total_job_duration_time = [0 for k in range(K)]
+    time_of_synchronized_job = calculate_synchronized_jobs_arrival_time(Tour, charging_time)
+    if time_of_synchronized_job == False:
+        return False
+
+    for k in range(K):
+        Tourr = Tour[k]
+        if len(Tourr) > 1:
+            Tour_without_depot = copy.copy(Tourr)  # indexleri rahat tutabilmek için bitiş deposu çıkarılır
+            Tour_without_depot.pop()
+            arrival_time[k].append(480)
+            time = 480
+            for loci, i in enumerate(Tour_without_depot):
+                j = Tourr[loci + 1]
+                if i < D + 1:
+                    time += s_i_j[i - 1][j - 1]
+                    if time > 1020:
+                        return False
+                    else:  # eğer time 1020'den küçük ise
+                        if D + Job + 1 > j > D:  # eğer bir işe gidiliyor ise
+                            if time_of_synchronized_job[
+                                j - D - 1] > 0:  # eğer gidilen iş senkronize bir iş ise
+                                if time_of_synchronized_job[j - D - 1] >= time:
+                                    time = time_of_synchronized_job[
+                                        j - D - 1]  # gidilen zaman önceden belirlenen senkronize işin zamanı olur
+                                    if b_j[
+                                        j - D - 1] < time:  # eğer time işin son yapılma anından büyük ise False dön
+                                        return False
+                                    elif a_j[
+                                        j - D - 1] > time:  # eğer time işin en erken yapılma anından küçük ise False dön
+                                        return False
+                                    else:
+                                        arrival_time[k].append(time)
+                                else:
+                                    return False
+                            else:  # eğer gidilen iş senkronize değil ise
+                                if b_j[j - D - 1] < time:
+                                    return False
+                                elif a_j[j - D - 1] > time:
+                                    spare_time[k] = a_j[j - D - 1] - time
+                                    time = a_j[j - D - 1]
+                                    arrival_time[k].append(time)
+                                else:
+                                    arrival_time[k].append(time)
+                        else:
+                            arrival_time[k].append(time)
+
+                elif i > D and i < D + Job + 1:  # eğer şuanda bir işte bulunuyorsam
+                    time += s_i_j[i - 1][j - 1] + dur[i - 1]
+                    total_job_duration_time[k] += dur[i - 1]
+                    if time > 1020:
+                        return False
+                    else:
+                        if D + Job + 1 > j > D:  # eğer bir işe gidiliyor ise
+                            if time_of_synchronized_job[
+                                j - D - 1] > 0:  # eğer gidilen iş senkronize bir iş ise
+                                if time_of_synchronized_job[j - D - 1] >= time:
+                                    time = time_of_synchronized_job[
+                                        j - D - 1]  # gidilen zaman önceden belirlenen senkronize işin zamanı olur
+                                    if b_j[
+                                        j - D - 1] < time:  # eğer time işin son yapılma anından büyük ise False dön
+                                        return False
+                                    elif a_j[
+                                        j - D - 1] > time:  # eğer time işin en erken yapılma anından küçük ise False dön
+                                        return False
+                                    else:
+                                        arrival_time[k].append(time)
+                                else:
+                                    return False
+                            else:  # eğer gidilen iş senkronize değil ise
+                                if b_j[j - D - 1] < time:
+                                    return False
+                                elif a_j[j - D - 1] > time:
+                                    spare_time[k] = a_j[j - D - 1] - time
+                                    time = a_j[j - D - 1]
+                                    arrival_time[k].append(time)
+                                else:
+                                    arrival_time[k].append(time)
+                        else:
+                            arrival_time[k].append(time)
+                elif D + Job + CS + 1 > i > D + Job:  # eğer şuanda bir şarj istasyonunda bulunuyorsam
+                    time += s_i_j[i - 1][j - 1] + charging_time[k][i - D - Job - 1]
+                    if time > 1020:
+                        return False
+                    else:
+                        if D + Job + 1 > j > D:  # eğer bir işe gidiliyor ise
+                            if time_of_synchronized_job[
+                                j - D - 1] > 0:  # eğer gidilen iş senkronize bir iş ise
+                                if time_of_synchronized_job[j - D - 1] >= time:
+                                    time = time_of_synchronized_job[
+                                        j - D - 1]  # gidilen zaman önceden belirlenen senkronize işin zamanı olur
+                                    if b_j[
+                                        j - D - 1] < time:  # eğer time işin son yapılma anından büyük ise False dön
+                                        return False
+                                    elif a_j[
+                                        j - D - 1] > time:  # eğer time işin en erken yapılma anından küçük ise False dön
+                                        return False
+                                    else:
+                                        arrival_time[k].append(time)
+                                else:
+                                    return False
+                            else:  # eğer gidilen iş senkronize değil ise
+                                if b_j[j - D - 1] < time:
+                                    return False
+                                elif a_j[j - D - 1] > time:
+                                    spare_time[k] = a_j[j - D - 1] - time
+                                    time = a_j[j - D - 1]
+                                    arrival_time[k].append(time)
+                                else:
+                                    arrival_time[k].append(time)
+                        else:
+                            arrival_time[k].append(time)
+    return arrival_time, spare_time, total_job_duration_time
+
+
+def calculate_synchronized_jobs_arrival_time(Tour, charging_time):
+    arrival_time = [[] for k in range(K)]
+    time_of_synchronized_job = [0 for i in range(Job)]
+    is_job_synchronized = [0 for i in range(D + Job + CS + D)]
+    for i in range(Job):
+        for j in range(Job):
+            if p_jj[i][j] == 1:
+                is_job_synchronized[i] = 1
+    for k in range(K):
+        if sum(is_job_synchronized) > 0:
+            Tourr = Tour[k]
+            if len(Tourr) > 1:
+                Tour_without_depot = copy.copy(
+                    Tourr)  # indexleri rahat tutabilmek için bitiş deposu çıkarılır
+                Tour_without_depot.pop()
+                arrival_time[k].append(480)
+                time = 480
+
+                for loci, i in enumerate(Tour_without_depot):
+                    j = Tourr[loci + 1]
+                    if i < D + 1:
+                        time += s_i_j[i - 1][j - 1]
+                        if time > 1020:
+                            return False
+                        else:
+                            if D + Job + 1 > j > D:
+                                if b_j[j - D - 1] < time:
+                                    return False
+                                elif a_j[j - D - 1] > time:
+                                    time = a_j[j - D - 1]
+                                    arrival_time[k].append(time)
+                                else:
+                                    arrival_time[k].append(time)
+                            else:
+                                arrival_time[k].append(time)
+
+                    elif i > D and i < D + Job + 1:
+                        time += s_i_j[i - 1][j - 1] + dur[i - 1]
+                        if time > 1020:
+                            return False
+                        else:
+                            if D + Job + 1 > j > D:
+                                if b_j[j - D - 1] < time:
+                                    return False
+                                elif a_j[j - D - 1] > time:
+                                    time = a_j[j - D - 1]
+                                    arrival_time[k].append(time)
+                                else:
+                                    arrival_time[k].append(time)
+                            else:
+                                arrival_time[k].append(time)
+                    elif D + Job + CS + 1 > i > D + Job:
+                        time += s_i_j[i - 1][j - 1] + charging_time[k][i - D - Job - 1]
+                        if time > 1020:
+                            return False
+                        else:
+                            if D + Job + 1 > j > D:
+                                if b_j[j - D - 1] < time:
+
+                                    return False
+                                elif a_j[j - D - 1] > time:
+                                    time = a_j[j - D - 1]
+                                    arrival_time[k].append(time)
+                                else:
+                                    arrival_time[k].append(time)
+                            else:
+                                arrival_time[k].append(time)
+    for k in range(K):
+        if sum(is_job_synchronized) > 0:
+            for job1 in range(Job):
+                for job2 in range(Job):
+                    if p_jj[job1][job2] == 1:
+                        for i in range(len(Tour[k])):
+                            if Tour[k][i] == job1 + D + 1:
+                                time_of_synchronized_job[job1] = arrival_time[k][i]
+                            if Tour[k][i] == job2 + D + 1:
+                                time_of_synchronized_job[job2] = arrival_time[k][i]
+    for job1 in range(Job):
+        for job2 in range(Job):
+            if p_jj[job1][job2] == 1:
+                if time_of_synchronized_job[job1] > time_of_synchronized_job[job2]:
+                    time_of_synchronized_job[job2] = time_of_synchronized_job[job1]
+                else:
+                    time_of_synchronized_job[job1] = time_of_synchronized_job[job2]
+
+    return time_of_synchronized_job
+
+
+# This function takes jobs of a and b, and the Tour of all vehicles and returns True if swap is feasible of nurse-job quality.
+def is_nurse_quality_satisfied(a,
+                               v1):  # [[0,1,0],[1,0,0],[0,0,1]] shows vehicle-nurse assignment q_j and q_n is list of lists which shows qualities
+    for n in range(Nurse):
+        if assigned_nurses_final[n][v1] == 1:
+            for skill in range(number_of_skill_set):
+                if q_n[n][skill] < q_j[a - (D + 1)][skill]:
+                    return False
+    return True
+
+
+def swap_2_nurses(n1, n2, inital_assignment):
+    x = inital_assignment[n1]
+    inital_assignment[n1] = inital_assignment[n2]
+    inital_assignment[n2] = x
+    return inital_assignment
+
+
+# This function takes jobs of a and b, and the Tour of all vehicles and returns True if swap is feasible of nurse-job quality.
+def is_nurse_quality_satisfied_swap_jobs(a, b,
+                                         Tour):  # [[0,1,0],[1,0,0],[0,0,1]] shows vehicle-nurse assignment q_j and q_n is list of lists which shows qualities
+
+    Tourr = Tour.copy()
+    for locT, Tours in enumerate(Tourr):
+        for j in Tours:
+            if j == a:
+                vehicle_1 = locT
+            if j == b:
+                vehicle_2 = locT
+
+    for n in range(Nurse):
+        if assigned_nurses_final[n][vehicle_1] == 1:
+            for skill in range(number_of_skill_set):
+                if q_n[n][skill] < q_j[b - (D + 1)][skill]:
+                    return False
+
+    for n in range(Nurse):
+        if assigned_nurses_final[n][vehicle_2] == 1:
+            for skill in range(number_of_skill_set):
+                if q_n[n][skill] < q_j[a - (D + 1)][skill]:
+                    return False
+    return True
+
+
+def is_nurse_quality_satisfied_all(nurse_assignment, initial_tour):
+    for n1 in range(Nurse):
+        for v1 in range(K):
+            if nurse_assignment[n1][v1] == 1:
+                jobs_in_v1 = [i for i in initial_tour[v1] if i > D and i < D + Job + 1]
+                for job in jobs_in_v1:
+                    for skill in range(number_of_skill_set):
+                        if q_n[n1][skill] < q_j[job - (D + 1)][skill]:
+                            return False
+    return True
+
+
+#########HELPER FUNCTIONS FOR LOCAL SEARCH ##############
+
+def sort_vehicles(Tour):
+    vehicle_to_remove = []
+    number_of_jobs_in_tour = [len(Tour[k]) - 2 for k in range(K)]
+    vehiclesss = sorted(range(len(number_of_jobs_in_tour)), reverse=False,
+                        key=lambda i: number_of_jobs_in_tour[i])  # araçları iş sayılarına göre sırala
+    for k in vehiclesss:
+        if len(Tour[k]) > 0:  # eğer atanmış iş var ise en düşük iş atanan aracı seç
+            vehicle_to_remove.append(k)
+    return vehicle_to_remove
+
+
+def remove_vehicle(Tour, vehicle_to_remove):  # en az işe sahip olan araçtaki tüm işleri araçtan çıkartır.
+    Tourr = Tour.copy()
+    job_in_tour = []
+
+    for i in Tourr[vehicle_to_remove]:
+        if D < i < D + Job + 1:
+            job_in_tour.append(i)  # aracın turundaki işleri ekle
+    Tourr[vehicle_to_remove].clear()
+    return Tourr, job_in_tour
+
+
+def remove_insert_job(a, index, vehicle, Tour):
+    Tourr = Tour.copy()
+    Tourr[vehicle].insert(index, a)
+    for locj, j in enumerate(Tour):
+        if locj != vehicle:
+            for loci, i in enumerate(j):
+                if i == a:
+                    Tourr[locj].remove(a)
+                if len(j) == 2:
+                    Tourr[locj].clear()
+    return Tourr
+
+
+def insert_job(a, index, vehicle, Tour):
+    Tourr = Tour.copy()
+    Tourr[vehicle].insert(index, a)
+    return Tourr
+
+
+def swap_jobs(a, b, Tour):
+    Tourr = Tour.copy()
+    for loci, i in enumerate(Tourr):
+        for locj, j in enumerate(i):
+            if j == a:
+                Tourr[loci][locj] = b
+            elif j == b:
+                Tourr[loci][locj] = a
+    return Tourr
+
+
+def three_opt(k, index, Tour, broad=True):
+    # choose 3 unique edges defined by their first node
+    a = index[0]
+    c = index[1]
+    e = index[2]
+    b, d, f = a + 1, c + 1, e + 1
+
+    if broad == True:
+        sol_list = []
+        for i in range(8):
+            # allow any of the 8
+            if i == 0:
+                sol = Tour[:a + 1] + Tour[b:c + 1] + Tour[d:e + 1] + Tour[f:]
+                sol_list.append(sol)  # identity
+            if i == 1:
+                sol = Tour[:a + 1] + Tour[b:c + 1] + Tour[e:d - 1:-1] + Tour[f:]
+                sol_list.append(sol)
+            if i == 2:
+                sol = Tour[:a + 1] + Tour[c:b - 1:-1] + Tour[d:e + 1] + Tour[f:]
+                sol_list.append(sol)
+            if i == 3:
+                sol = Tour[:a + 1] + Tour[c:b - 1:-1] + Tour[e:d - 1:-1] + Tour[f:]
+                sol_list.append(sol)
+            if i == 4:
+                sol = Tour[:a + 1] + Tour[d:e + 1] + Tour[b:c + 1] + Tour[f:]
+                sol_list.append(sol)
+            if i == 5:
+                sol = Tour[:a + 1] + Tour[d:e + 1] + Tour[c:b - 1:-1] + Tour[f:]
+                sol_list.append(sol)
+            if i == 6:
+                sol = Tour[:a + 1] + Tour[e:d - 1:-1] + Tour[b:c + 1] + Tour[f:]
+                sol_list.append(sol)
+            if i == 7:
+                sol = Tour[:a + 1] + Tour[e:d - 1:-1] + Tour[c:b - 1:-1] + Tour[f:]
+                sol_list.append(sol)
+
+    for i in range(8):
+        sol_list[i].append(1 + D + Job + CS + k)
+
+    return sol_list
+
+
+def swap_two_vehicles_2(v1, v2, current_Tour,
+                        initial_assignment):  # current Tour=[a,b,c] a,b,c nin her biri Tur listesi
+    Tour = copy.deepcopy(current_Tour)
+    index_of_vehicles = [v1, v2]  # swaplanacak araçların listesi random bir şekilde seçilir.
+    is_tour_swapped = 0
+    n_v = initial_assignment
+    if len(Tour[index_of_vehicles[0]]) == 0:
+        Tour[index_of_vehicles[0]].append(v1 + 1)
+        Tour[index_of_vehicles[0]].append(v1 + Job + CS + D + 1)
+        Tour[index_of_vehicles[0]][1:-1] = Tour[index_of_vehicles[1]][1:-1]
+        Tour[index_of_vehicles[1]].clear()
+    elif len(Tour[index_of_vehicles[1]]) == 0 and is_tour_swapped == 0:
+        Tour[index_of_vehicles[1]].append(v2 + 1)
+        Tour[index_of_vehicles[1]].append(v2 + Job + CS + D + 1)
+        Tour[index_of_vehicles[1]][1:-1] = Tour[index_of_vehicles[0]][1:-1]
+        Tour[index_of_vehicles[0]].clear()
+    else:
+        temp = Tour[index_of_vehicles[0]]
+        temp = temp[1:-1]
+        Tour[index_of_vehicles[0]][1:-1] = Tour[index_of_vehicles[1]][1:-1]
+        Tour[index_of_vehicles[1]][1:-1] = temp
+
+    for n in range(Nurse):
+        if n_v[n][index_of_vehicles[0]] == 1:
+            nurse1 = n
+        if n_v[n][index_of_vehicles[1]] == 1:
+            nurse2 = n
+
+    nurse_vehicle = copy.deepcopy(n_v)
+    index_of_nurses = [nurse1, nurse2]
+    temp = nurse_vehicle[index_of_nurses[0]]
+    nurse_vehicle[index_of_nurses[0]] = nurse_vehicle[index_of_nurses[1]]
+    nurse_vehicle[index_of_nurses[1]] = temp
+
+    return Tour, nurse_vehicle
+
+
+def local_search_remove_vehicle(initial_tour):
+    endusuk = 1000000
+    Tour_to_remove = copy.deepcopy(initial_tour)
+    remove_vehicle_list = sort_vehicles(Tour_to_remove)  # aracı boz
+    degisiklikler = []
+    degisiklik_degeri = []
+    for k in remove_vehicle_list:
+        Tour_to_remove = copy.deepcopy(initial_tour)
+        remove_vehicle_list = remove_vehicle(Tour_to_remove, k)
+        Tour = remove_vehicle_list[0]
+        job_in_tour = remove_vehicle_list[1]  # en az işe sahip araçtaki işler kümesi
+        is_i_assigned = [0 for i in range(len(job_in_tour))]
+        for loci, i in enumerate(job_in_tour):
+            if is_i_assigned[loci] == 0:  # eğer iş atanmamış ise
+                for v1, x in enumerate(Tour):  # turdaki diğer araçlar ve araçların turu
+                    if len(x) > 1:
+                        if is_nurse_quality_satisfied(i, v1) == True:
+                            for locj, j in enumerate(x):  # araçtaki indexler tutulur.
+                                if is_i_assigned[loci] == 0:  # eğer iş atanmamış ise
+                                    if len(x) - 1 >= locj > 0:
+                                        index = locj
+                                        Tour2 = copy.deepcopy(Tour)
+                                        Tour2[v1].insert(index, i)  # turdaki indexe işi ekle
+                                        if calculate_cost(Tour2, assigned_nurses_final) < endusuk:
+                                            charging_time_returned_list = calculate_battery(Tour2)
+                                            if charging_time_returned_list != False:
+                                                charging_time = charging_time_returned_list[0]
+                                                Tour3 = charging_time_returned_list[1]
+                                                time_feasibility_returned_list = calculate_time(charging_time,
+                                                                                                Tour3)
+                                                if time_feasibility_returned_list != False:
+                                                    time_feasibility = time_feasibility_returned_list[0]
+                                                    is_i_assigned[loci] = 1
+                                                    current_cost1 = calculate_cost(Tour3, assigned_nurses_final)
+                                                    Tour = copy.deepcopy(Tour3)
+                                                    degisiklikler.append(Tour3)
+                                                    degisiklik_degeri.append(current_cost1)
+                                                    endusuk = min(degisiklik_degeri)
+
+    index = sorted(range(len(degisiklikler)), reverse=False, key=lambda i: degisiklik_degeri[i])
+    degisiklik_degeri.sort(reverse=False)
+
+    if len(degisiklikler) > 0:
+        current_cost2 = calculate_cost(degisiklikler[index[0]], assigned_nurses_final)
+        current_tour2 = degisiklikler[index[0]]
+
+    else:
+        current_cost2 = calculate_cost(initial_tour, assigned_nurses_final)
+        current_tour2 = initial_tour
+    return current_tour2, current_cost2
+
+
+def Local_search_remove_insert(initial_tour):
+    endusuk = -1000000
+    jobs_in_the_grasp_tour = []
+    for i in range(D + 1, D + Job + 1):
+        for k in range(K):
+            if i in initial_tour[k]:
+                jobs_in_the_grasp_tour.append(i)
+    degisiklikler = []
+    degisiklik_degeri = []
+    initial_cost = calculate_cost(initial_tour, assigned_nurses_final)
+    for i in jobs_in_the_grasp_tour:
+        for vehicle1, x in enumerate(initial_tour):
+            if len(x) > 1 and i not in x:
+                if is_nurse_quality_satisfied(i, vehicle1) == True:
+                    for locj, j in enumerate(x):
+                        if len(x) > locj > 0:
+                            index = locj
+                            Tour = copy.deepcopy(initial_tour)
+                            Tour2 = remove_insert_job(i, index, vehicle1, Tour)
+                            if initial_cost - calculate_cost(Tour2, assigned_nurses_final) > endusuk:
+                                charging_time_returned_list = calculate_battery(Tour2)
+                                if charging_time_returned_list != False:
+                                    charging_time = charging_time_returned_list[0]
+                                    Tour3 = charging_time_returned_list[1]
+                                    time_feasibility_returned_list = calculate_time(charging_time, Tour3)
+                                    if time_feasibility_returned_list != False:  # time and battery satisfaction
+                                        current_cost1 = calculate_cost(Tour3, assigned_nurses_final)
+                                        degisiklikler.append(Tour3)
+                                        degisiklik_degeri.append(initial_cost - current_cost1)
+                                        endusuk = max(degisiklik_degeri)
+    index = sorted(range(len(degisiklikler)), reverse=True, key=lambda i: degisiklik_degeri[i])
+    degisiklik_degeri.sort(reverse=True)
+    if len(degisiklikler) > 0:
+        current_cost2 = calculate_cost(degisiklikler[index[0]], assigned_nurses_final)
+        current_tour2 = degisiklikler[index[0]]
+    else:
+        current_cost2 = calculate_cost(initial_tour, assigned_nurses_final)
+        current_tour2 = initial_tour
+    return current_cost2, current_tour2
+
+
+def Local_search_swap_jobs(initial_tour):
+    jobs_in_the_grasp_tour = []
+    initial_cost = calculate_cost(initial_tour, assigned_nurses_final)
+    Tour = copy.deepcopy(initial_tour)
+    for i in range(D + 1, D + Job + 1):
+        for k in range(K):
+            if i in initial_tour[k]:
+                jobs_in_the_grasp_tour.append(i)
+    jobs_vehicle_dict = {}
+    for loci, i in enumerate(initial_tour):
+        for j in i:
+            if D < j < D + Job + 1:
+                jobs_vehicle_dict[j] = loci
+    i = random.choice(jobs_in_the_grasp_tour)
+    j = random.choice(jobs_in_the_grasp_tour)
+    xx = 0
+    while jobs_vehicle_dict[i] == jobs_vehicle_dict[j]:
+        xx += 1
+        j = random.choice(jobs_in_the_grasp_tour)
+        if xx == 10:
+            return initial_cost, initial_tour
+    Tour2 = swap_jobs(i, j, Tour)
+    if is_nurse_quality_satisfied_all(assigned_nurses_final, Tour2) != False:
+        charging_time_returned_list = calculate_battery(Tour2)
+        if charging_time_returned_list != False:
+            charging_time = charging_time_returned_list[0]
+            Tour3 = charging_time_returned_list[1]
+            time_feasibility_returned_list = calculate_time(charging_time, Tour3)
+            if time_feasibility_returned_list != False:
+                current_cost2 = calculate_cost(Tour3, assigned_nurses_final)
+                return current_cost2, Tour3
+    return initial_cost, initial_tour
+
+
+def Local_search_insert_undone_jobs(initial_tour):
+    done_jobs = []
+    undone_jobs1 = []
+    endusuk = -10000000
+    for i in range(D + 1, D + Job + 1):
+        for k in range(K):
+            if i in initial_tour[k]:
+                done_jobs.append(i)
+
+    for i in range(D + 1, D + Job + 1):
+        if i not in done_jobs:
+            undone_jobs1.append(i)
+
+    jobs_in_the_undone_jobs = copy.deepcopy(undone_jobs1)
+    degisiklikler = []
+    degisiklik_degeri = []
+    initial_cost = calculate_cost(initial_tour,
+                                  assigned_nurses_final)  # initially best cost is the one obtained from GRASP
+    incumbent_tour = copy.deepcopy(initial_tour)  # initially best tour is grasp tour
+
+    number_of_jobs_in_tour = [len(incumbent_tour[k]) - 2 for k in range(K)]
+    sorted_vehicles = sorted(range(len(number_of_jobs_in_tour)), reverse=True,
+                             key=lambda i: number_of_jobs_in_tour[i])  # araçları iş sayılarına göre sırala
+
+    for i in jobs_in_the_undone_jobs:
+        for vehicle1 in sorted_vehicles:
+            if len(incumbent_tour[vehicle1]) > 0:
+                if is_nurse_quality_satisfied(i,
+                                              vehicle1) == True:  # from different tours and nurse quality satisfaction
+                    for locj, j in enumerate(incumbent_tour[vehicle1]):
+                        if len(incumbent_tour[vehicle1]) - 1 > locj > 0:
+                            index = locj
+                            Tour = copy.deepcopy(incumbent_tour)
+                            Tour2 = insert_job(i, index, vehicle1, Tour)  # move operator
+                            if initial_cost - calculate_cost(Tour2, assigned_nurses_final) > endusuk:
+                                charging_time_returned_list = calculate_battery(Tour2)
+                                if charging_time_returned_list != False:
+                                    charging_time = charging_time_returned_list[0]
+                                    Tour3 = charging_time_returned_list[1]
+                                    time_feasibility_returned_list = calculate_time(charging_time, Tour3)
+                                    if time_feasibility_returned_list != False:  # time and battery satisfaction
+                                        time_feasibility = time_feasibility_returned_list[0]
+                                        current_cost1 = calculate_cost(Tour3, assigned_nurses_final)
+                                        degisiklikler.append(Tour3)
+                                        degisiklik_degeri.append(initial_cost - current_cost1)
+                                        endusuk = max(degisiklik_degeri)
+            elif len(incumbent_tour[vehicle1]) == 0:
+                if is_nurse_quality_satisfied(i,
+                                              vehicle1) == True:  # from different tours and nurse quality satisfaction
+                    Tour = copy.deepcopy(incumbent_tour)
+                    Tour[vehicle1].append(vehicle1 + 1)
+                    Tour[vehicle1].append(i)
+                    Tour[vehicle1].append(vehicle1 + 1 + Job + CS + D)
+                    charging_time_returned_list = calculate_battery(Tour)
+                    if charging_time_returned_list != False:
+                        charging_time = charging_time_returned_list[0]
+                        Tour3 = charging_time_returned_list[1]
+                        time_feasibility_returned_list = calculate_time(charging_time, Tour3)
+                        if time_feasibility_returned_list != False:  # time and battery satisfaction
+                            time_feasibility = time_feasibility_returned_list[0]
+                            current_cost1 = calculate_cost(Tour3, assigned_nurses_final)
+                            degisiklikler.append(Tour3)
+                            degisiklik_degeri.append(initial_cost - current_cost1)
+                            endusuk = max(degisiklik_degeri)
+
+    index = sorted(range(len(degisiklikler)), reverse=True, key=lambda i: degisiklik_degeri[i])
+    degisiklik_degeri.sort(reverse=True)
+    if len(degisiklik_degeri) > 0:
+        current_cost2 = calculate_cost(degisiklikler[index[0]], assigned_nurses_final)
+        current_tour2 = degisiklikler[index[0]]
+    else:
+        current_cost2 = calculate_cost(initial_tour, assigned_nurses_final)
+        current_tour2 = initial_tour
+    return current_cost2, current_tour2
+
+
+def local_search_3_opt(initial_tour):
+    initial_tour = copy.deepcopy(initial_tour)
+    initial_cost = calculate_cost(initial_tour, assigned_nurses_final)
+    degisiklikler = []
+    degisiklik_degeri = []
+    endusuk = -1000000
+    for k in range(K):
+        indexes = []
+        Tour_of_vehicle = copy.deepcopy(initial_tour[k])
+        if len(Tour_of_vehicle) > 1:
+            Tour_of_vehicle.pop()
+            n = len(Tour_of_vehicle)
+            if n >= 5:
+                for i in range(n):
+                    for j in range(i + 2, n):
+                        for t in range(j + 2, n):
+                            indexes.append([i, j, t])
+            for index in indexes:
+                sol_list = three_opt(k, index, Tour_of_vehicle)
+                for i in sol_list:
+                    incumbent_tour_3_opt = copy.deepcopy(initial_tour)
+                    Changed_tour_of_vehicle = i
+                    incumbent_tour_3_opt[k] = Changed_tour_of_vehicle
+                    if initial_cost - calculate_cost(incumbent_tour_3_opt, assigned_nurses_final) > endusuk:
+                        charging_time_returned_list = calculate_battery(incumbent_tour_3_opt)
+                        if charging_time_returned_list != False:
+                            charging_time = charging_time_returned_list[0]
+                            incumbent_tour_3_opt1 = charging_time_returned_list[1]
+                            time_feasibility_returned_list = calculate_time(charging_time,
+                                                                            incumbent_tour_3_opt1)
+                            if time_feasibility_returned_list != False:
+                                current_cost1 = calculate_cost(incumbent_tour_3_opt1, assigned_nurses_final)
+                                degisiklikler.append(incumbent_tour_3_opt1)
+                                degisiklik_degeri.append(initial_cost - current_cost1)
+                                endusuk = max(degisiklik_degeri)
+    index = sorted(range(len(degisiklikler)), reverse=True, key=lambda i: degisiklik_degeri[i])
+    degisiklik_degeri.sort(reverse=True)
+    if len(degisiklik_degeri) > 0:
+        current_cost2 = calculate_cost(degisiklikler[index[0]], assigned_nurses_final)
+        current_tour2 = degisiklikler[index[0]]
+    else:
+        current_cost2 = calculate_cost(initial_tour, assigned_nurses_final)
+        current_tour2 = initial_tour
+    return current_cost2, current_tour2
+
+
+def local_search_swap_vehicles(initial_tour):
+    initial_tour = copy.deepcopy(initial_tour)
+    initial_cost = calculate_cost(initial_tour, assigned_nurses_final)
+    nurse_vehicle = copy.deepcopy(assigned_nurses_final)
+    degisiklikler = []
+    degisiklik_degeri = []
+    nurse_vehicle_degisiklik = []
+    endusuk = -1000000
+    for v1 in range(K):
+        for v2 in range(K):
+            swap_two_vehicles_returned_list = swap_two_vehicles_2(v1, v2, initial_tour, nurse_vehicle)
+            if swap_two_vehicles_returned_list != False:
+                Tour2 = swap_two_vehicles_returned_list[0]
+                nurse_vehicle1 = swap_two_vehicles_returned_list[1]
+                if initial_cost - calculate_cost(Tour2, assigned_nurses_final) > endusuk:
+                    charging_time_returned_list = calculate_battery(Tour2)
+                    if charging_time_returned_list != False:
+                        charging_time = charging_time_returned_list[0]
+                        Tour3 = charging_time_returned_list[1]
+                        time_feasibility_returned_list = calculate_time(charging_time, Tour3)
+                        if time_feasibility_returned_list != False:
+                            current_cost1 = calculate_cost(Tour3, nurse_vehicle1)
+                            degisiklikler.append(Tour3)
+                            degisiklik_degeri.append(initial_cost - current_cost1)
+                            nurse_vehicle_degisiklik.append(nurse_vehicle1)
+                            endusuk = max(degisiklik_degeri)
+
+    index = sorted(range(len(degisiklikler)), reverse=True, key=lambda i: degisiklik_degeri[i])
+    index_nv = sorted(range(len(nurse_vehicle_degisiklik)), reverse=True,
+                      key=lambda i: degisiklik_degeri[i])
+    degisiklik_degeri.sort(reverse=True)
+    if len(degisiklik_degeri) > 0:
+        current_cost2 = calculate_cost(degisiklikler[index[0]], nurse_vehicle_degisiklik[index_nv[0]])
+        current_tour2 = degisiklikler[index[0]]
+        nurse_vehicle2 = nurse_vehicle_degisiklik[index[0]]
+    else:
+        current_cost2 = calculate_cost(initial_tour, assigned_nurses_final)
+        current_tour2 = initial_tour
+        nurse_vehicle2 = copy.deepcopy(assigned_nurses_final)
+    return current_cost2, current_tour2, nurse_vehicle2
+
+
+def local_search_swap_nurses(initial_tour):
+    best_tour = initial_tour
+    best_cost = calculate_cost(best_tour, assigned_nurses_final)
+    nurse_vehicle = copy.deepcopy(assigned_nurses_final)
+    degisiklikler = []
+    degisiklik_degeri = []
+    nurse_vehicle_degisiklik = []
+    for n1 in range(K):
+        for n2 in range(K):
+            new_assignment = swap_2_nurses(n1, n2, nurse_vehicle)
+            if is_nurse_quality_satisfied_all(new_assignment, best_tour) != False:
+                nurse_vehicle1 = copy.deepcopy(new_assignment)
+                current_cost1 = calculate_cost(best_tour, nurse_vehicle1)  # calculate the cost of the tour
+                degisiklikler.append(best_tour)
+                degisiklik_degeri.append(best_cost - current_cost1)
+                nurse_vehicle_degisiklik.append(nurse_vehicle1)
+
+    index = sorted(range(len(degisiklikler)), reverse=True, key=lambda i: degisiklik_degeri[i])
+    index_nv = sorted(range(len(nurse_vehicle_degisiklik)), reverse=True,
+                      key=lambda i: degisiklik_degeri[i])
+    degisiklik_degeri.sort(reverse=True)
+    if len(degisiklik_degeri) > 0:
+        current_cost2 = calculate_cost(degisiklikler[index[0]],
+                                       nurse_vehicle_degisiklik[index_nv[0]])
+        current_tour2 = degisiklikler[index[0]]
+        nurse_vehicle2 = nurse_vehicle_degisiklik[index[0]]
+    else:
+        current_cost2 = calculate_cost(initial_tour, assigned_nurses_final)
+        current_tour2 = initial_tour
+        nurse_vehicle2 = copy.deepcopy(assigned_nurses_final)
+    return current_cost2, current_tour2, nurse_vehicle2
+
+
+def select_random_job(number_of_job, Tour):
+    jobs_in_the_grasp_tour = []
+    random_job = [0 for i in range(number_of_job)]
+
+    for i in range(D + 1, D + Job + 1):
+        for k in range(K):
+            if i in Tour[k]:
+                jobs_in_the_grasp_tour.append(i)
+
+    for i in range(number_of_job):
+        random_job[i] = random.choice(jobs_in_the_grasp_tour)
+        jobs_in_the_grasp_tour.remove(random_job[i])
+    return random_job
+
+
+def remove_job(job, Tour):
+    Tour2 = copy.deepcopy(Tour)
+    for k in range(K):
+        if job in Tour[k]:
+            Tour2[k].remove(job)
+    return Tour2
+
+
+def insert_job(a, index, vehicle, Tour):
+    Tourr = Tour.copy()
+    Tourr[vehicle].insert(index, a)
+    return Tourr
+
+
+def shaking_remove_insert(number_of_job, initial_tour):
+    random_jobs = select_random_job(number_of_job, initial_tour)
+    initial_tour2 = copy.deepcopy(initial_tour)
+    for locjob, job in enumerate(random_jobs):
+        degisiklikler = []
+        degisiklik_degeri = []
+        degisiklik_olasılığı = []
+        initial_cost2 = calculate_cost(initial_tour2, assigned_nurses_final)
+        initial_tour3 = remove_job(job, initial_tour2)
+        for vehicle1, x in enumerate(initial_tour3):
+            if len(x) > 1:
+                if is_nurse_quality_satisfied(job, vehicle1) == True:
+                    for locj, j in enumerate(x):
+                        if len(x) > locj > 0:
+                            index = locj
+                            Tour = copy.deepcopy(initial_tour3)
+                            Tour2 = insert_job(job, index, vehicle1, Tour)
+                            charging_time_returned_list = calculate_battery(Tour2)
+                            if charging_time_returned_list != False:
+                                charging_time = charging_time_returned_list[0]
+                                Tour3 = charging_time_returned_list[1]
+                                time_feasibility_returned_list = calculate_time(charging_time, Tour3)
+                                if time_feasibility_returned_list != False:  # time and battery satisfaction
+                                    current_cost1 = calculate_cost(Tour3, assigned_nurses_final)
+                                    degisiklikler.append(Tour3)
+                                    degisiklik_degeri.append(abs(initial_cost2 - current_cost1))
+
+        if sum(degisiklik_degeri) > 0:
+            for xxx in range(len(degisiklik_degeri)):
+                degisiklik_olasılığı.append(degisiklik_degeri[xxx] / sum(degisiklik_degeri))
+            yapılacak_degisiklik = int(choice(range(0, len(degisiklikler)), 1, p=degisiklik_olasılığı))
+            initial_tour2 = copy.deepcopy(degisiklikler[yapılacak_degisiklik])
+        elif len(degisiklikler) > 0:
+            yapılacak_degisiklik = random.choice(range(0, len(degisiklikler)))
+            initial_tour2 = copy.deepcopy(degisiklikler[yapılacak_degisiklik])
+        else:
+            initial_tour2 = copy.deepcopy(initial_tour3)
+    return initial_tour2
+
+for deneme in range(0, 1):
+    for j in range(14, 27):
+        if j == 0:
+            excel = "50-G1-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 1:
+            excel = "50-G1-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 2:
+            excel = "50-G2-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 3:
+            excel = "50-G2-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 4:
+            excel = "50-G3-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 5:
+            excel = "50-G3-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 6:
+            excel = "50-G4-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 7:
+            excel = "50-G4-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 8:
+            excel = "50-G5-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 9:
+            excel = "50-G5-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 10:
+            excel = "50-G6-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 11:
+            excel = "50-G6-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 12:
+            excel = "50-G7-a"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 13:
+            excel = "50-G7-c"
+            control_parameter1 = 18
+            control_parameter2 = 47
+        elif j == 14:
+            excel = "40-G1-a"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 15:
+            excel = "40-G1-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 16:
+            excel = "40-G2-a"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 17:
+            excel = "40-G2-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 18:
+            excel = "40-G3-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 19:
+            excel = "40-G4-a"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 20:
+            excel = "40-G4-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 21:
+            excel = "40-G5-a"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 22:
+            excel = "40-G5-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 23:
+            excel = "40-G6-a"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 24:
+            excel = "40-G6-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 25:
+            excel = "40-G7-a"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 26:
+            excel = "40-G7-c"
+            control_parameter1 = 15
+            control_parameter2 = 44
+        elif j == 27:
+            excel = "60-G1-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 28:
+            excel = "60-G1-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 29:
+            excel = "60-G2-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 30:
+            excel = "60-G2-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 31:
+            excel = "60-G3-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 32:
+            excel = "60-G3-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 33:
+            excel = "60-G4-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 34:
+            excel = "60-G4-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 35:
+            excel = "60-G5-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 36:
+            excel = "60-G5-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 37:
+            excel = "60-G6-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 38:
+            excel = "60-G6-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 39:
+            excel = "60-G7-a"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 40:
+            excel = "60-G7-c"
+            control_parameter1 = 22
+            control_parameter2 = 51
+        elif j == 41:
+            excel = "10j3n3cs0s-md-w-0sy-R.1"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 42:
+            excel = "10j3n3cs0s-md-w-0sy-W.1"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 43:
+            excel = "10j3n3cs1s-md-w-0sy-R-2"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 44:
+            excel = "10j3n3cs1s-md-w-0sy-w-2"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 45:
+            excel = "10j3n3cs1s-md-t-0sy-r-3"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 46:
+            excel = "10j3n3cs1s-md-t-0sy-w-3"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 47:
+            excel = "10j3n3cs1s-md-w-0sy-hc-R-4"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 48:
+            excel = "10j3n3cs1s-md-w-0sy-hc-W-4"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 49:
+            excel = "10j3n3cs2s-td-w-0sy-R-5"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 50:
+            excel = "10j3n3cs2s-td-w-0sy-W-5"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 51:
+            excel = "10j3n3cs2s-md-w-0sy-R-6"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 52:
+            excel = "10j3n3cs2s-md-w-0sy-W-6"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 53:
+            excel = "10j3n3cs2s-md-t-0sy-R7(new)"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 54:
+            excel = "10j3n3cs2s-md-t-0sy-W7"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 55:
+            excel = "10j3n3cs2s-md-t-0sy-r8"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 56:
+            excel = "10j3n3cs2s-md-t-0sy-W8"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 57:
+            excel = "10j3n3cs2s-md-t-0sy-R.9"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 58:
+            excel = "10j3n3cs2s-md-t-0sy-W9"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 59:
+            excel = "10j3n3cs2s-md-w-1sy-r-10"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 60:
+            excel = "10j3n3cs2s-md-w-1sy-W-10(new)"
+            control_parameter1 = 5
+            control_parameter2 = 34
+        elif j == 61:
+            excel = "20j6n4cs0s-md-w-0sy-R-1-NEW"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 62:
+            excel = "20j6n4cs0s-md-w-0sy-W.1"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 63:
+            excel = "20j6n4cs1s-md-w-0sy-R-2"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 64:
+            excel = "20j6n4cs1s-md-w-0sy-w-2"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 65:
+            excel = "20j6n4cs1s-md-t-0sy-R-3"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 66:
+            excel = "20j6n4cs1s-md-t-0sy-w-3"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 67:
+            excel = "20j6n4cs1s-md-w-0sy-hc-R-4-NEW"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 68:
+            excel = "20j6n4cs1s-md-w-0sy-hc-W-4"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 69:
+            excel = "20j6n4cs2s-md-w-0sy-R-5"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 70:
+            excel = "20j6n4cs2s-md-w-0sy-W-5"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 71:
+            excel = "20j6n4cs2s-md-w-0sy-R-6"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 72:
+            excel = "20j6n4cs2s-md-w-0sy-W-6"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 73:
+            excel = "20j6n4cs2s-md-t-0sy-R-7"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 74:
+            excel = "20j6n4cs2s-md-t-0sy-W-7"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 75:
+            excel = "20j6n4cs2s-md-t-0sy-R-8-NEW"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 76:
+            excel = "20j6n4cs2s-md-t-0sy-W-8"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 77:
+            excel = "20j6n4cs2s-md-t-0sy-R-9"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 78:
+            excel = "20j6n4cs2s-md-t-0sy-W-9"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 79:
+            excel = "20j6n4cs2s-md-w-2sy-R-10-NEW"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 80:
+            excel = "20j6n4cs2s-md-w-2sy-W-10-new"
+            control_parameter1 = 8
+            control_parameter2 = 37
+        elif j == 81:
+            excel = "30j10n5cs0s-md-w-0sy-R.1"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j ==82:
+            excel = "30j10n5cs0s-md-w-0sy-W1"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 83:
+            excel = "30j10n5cs1s-md-w-0sy-R.2-"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 84:
+            excel = "30j10n5cs1s-md-w-0sy-W2"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 85:
+            excel = "30j10n5cs1s-md-t-0sy-R.3"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 86:
+            excel = "30j10n5cs1s-md-t-0sy-W3"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 87:
+            excel = "30j10n5cs1s-md-w-0sy-hc-R.4"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 88:
+            excel = "30j10n5cs1s-md-w-0sy-hc-W4"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 89:
+            excel = "30j10n5cs2s-td-w-0sy-R-5"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 90:
+            excel = "30j10n5cs2s-td-w-0sy-W5"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 91:
+            excel = "30j10n5cs2s-wd-w-0sy-R6"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 92:
+            excel = "30j10n5cs2s-wd-w-0sy-W6"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 93:
+            excel = "30j10n5cs2s-wd-t-0sy-R-7"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 94:
+            excel = "30j10n5cs2s-wd-t-0sy-W7"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 95:
+            excel = "30j10n5cs2s-wd-t-0sy-R-8"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 96:
+            excel = "30j10n5cs2s-wd-t-0sy-W8"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 97:
+            excel = "30j10n5cs2s-wd-t-0sy-R-9"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 98:
+            excel = "30j10n5cs2s-wd-t-0sy-W9"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 99:
+            excel = "30j10n5cs2s-wd-w-2sy-R-10"
+            control_parameter1 = 12
+            control_parameter2 = 41
+        elif j == 100:
+            excel = "30j10n5cs2s-wd-w-2sy-W-10"
+            control_parameter1 = 12
+            control_parameter2 = 41
+
+        for iteration10 in range(5):
+            Time1 = time.time()
+            # =============================================================================
+            # Read the data and define the parameters
+            # =============================================================================
+            wb = openpyxl.load_workbook("{}.xlsx".format(excel))
+            sheets = wb.sheetnames
+            sh1 = wb['Sayfa1']
+            sh2 = wb['Sayfa2']
+            sh3 = wb['Sayfa3']
+            sh4 = wb['Sayfa4']
+            Job = wb['Sayfa1']['C1'].value
+            K = wb['Sayfa1']['C2'].value
+            D = wb['Sayfa1']['C3'].value
+            Nurse = wb['Sayfa1']['C4'].value
+            CS = wb['Sayfa1']['C5'].value
+            r = wb['Sayfa1']['B6'].value
+            trav_cost = wb['Sayfa1']['B7'].value
+            c = wb['Sayfa1']['B8'].value
+            number_of_skill_set = wb['Sayfa1']['B9'].value
+            teta_nt_coefficient = wb['Sayfa4']['B1'].value
+            teta_nc_coefficient = wb['Sayfa4']['B2'].value
+            teta_nf_coefficient = wb['Sayfa4']['B3'].value
+            a_n = []
+            b_n = []
+            a_j = []
+            b_j = []
+            dur = []
+            cons_rate = []
+            Y = []
+            fixed_cost = []
+            distance = [[]]
+            s_i_j = [[]]
+            q_j = [[] for i in range(Job)]
+            q_n = [[] for n in range(Nurse)]
+            penalty = []
+
+            for j in range(2, 2 + Nurse):
+                a_n.append(sh1.cell(j, 6).value)
+            for j in range(2, 2 + Nurse):
+                b_n.append(sh1.cell(j, 7).value)
+            for j in range(control_parameter1, control_parameter1 + Job):
+                a_j.append(sh1.cell(j, 10).value)
+            for j in range(control_parameter1, control_parameter1 + Job):
+                b_j.append(sh1.cell(j, 11).value)
+            for j in range(2, 2 + D + Job):
+                dur.append(sh1.cell(j, 12).value)
+            for j in range(2, 2 + K):
+                cons_rate.append(sh1.cell(j, 20).value)
+            for j in range(2, 2 + K):
+                Y.append(sh1.cell(j, 23).value)
+            for j in range(2, 2 + Nurse):
+                fixed_cost.append(sh1.cell(j, 26).value)
+            for j in range(2, 2 + Job):
+                penalty.append(sh1.cell(j, 29).value)
+            distance = [[0 for x in range(D + Job + CS + D)] for y in range(D + Job + CS + D)]
+            for i in range(2, 2 + D + Job + CS + D):
+                for j in range(33, 33 + D + Job + CS + D):
+                    distance[i - 2][j - 33] = sh1.cell(i, j).value
+            s_i_j = [[0 for x in range(D + Job + CS + D)] for y in range(D + Job + CS + D)]
+            for i in range(2, 2 + D + Job + CS + D):
+                for j in range(3, 3 + D + Job + CS + D):
+                    s_i_j[i - 2][j - 3] = sh3.cell(i, j).value
+            for i in range(control_parameter2, control_parameter2 + Job):
+                for skill in range(number_of_skill_set):
+                    q_j[i - control_parameter2].append(sh2.cell(i, 2 + skill).value)
+            for i in range(31, 31 + Nurse):
+                for skill in range(number_of_skill_set):
+                    q_n[i - 31].append(sh2.cell(i, 5 + skill).value)
+            p_jj = [[0 for x in range(Job)] for y in range(Job)]
+            for i in range(2, 2 + Job):
+                for j in range(26, 26 + Job):
+                    p_jj[i - 2][j - 26] = sh2.cell(i, j).value
+
+            teta_it = calculateteta_it()
+            teta_id = calculate_id()
+            teta_ic = calculateteta_ic()
+            lambda_j = calculatelambda_j()
+            teta_nt = calculateteta_nt()
+            teta_nc = calculateteta_nc()
+            teta_nf = calculateteta_nf()
+            lambda_n = calculatelambda_n()
+            constraint = [[0 for n in range(Job)] for i in range(Nurse)]
+            compatibility = calculate_compatibility()
+            compatibility_prob = np.zeros((Job, Nurse))
+            compatibility_prob = calculate_compatibility_probability()
+            assignment_prob = [i / sum(Y) for i in Y]
+            best_found_solution = 9999999
+            best_found_assignment = [[] for k in range(K)]  # en iyi iterasyondaki atamaları tutar.
+            best_found_tour = [[] for k in range(K)]  # en iyi iterasyondaki değişkenleri tutar.
+            number_of_iteration = 50
+
+            for i in range(number_of_iteration):  # set number of iteration
+                Tour = [[] for k in range(K)]
+                N = [[] for k in range(K)]  # araca atanan herşey (küme modelde kullanılıyor)
+                V_N = [[] for k in range(K)]  # başlangıç depo hariç
+                V_0 = [[] for k in range(K)]  # bitiş depo hariç
+                V = [[] for k in range(K)]  # başlangıç ve bitiş hariç
+                J = [[] for k in range(K)]  # Jobs kopya
+                J_0 = [[] for k in range(K)]  # başlangıç artı J
+                S = [D + Job + i + 1 for i in range(CS)]  # boşta şarj istasyonları 19,20,21..
+
+                undone_jobs_iteration = []
+                x_var_iteration = [[] for k in range(K)]
+                t_var_iteration = [[] for k in range(K)]
+
+                Itertion_objective = []  # her araç için çözüldükten sonra objective değeri eklenir. Daha sonra toplanıp iterasyonun değeri olur
+                TSP_solution = [[] for k in range(K)]  # her modelin değişkenleri eklenir.
+                rota_olusturuldu_mu = ["hayır" for i in range(K)]
+                rota_olusturuldu_mu_hemsire = ["hayır" for n in range(Nurse)]
+
+                synchronized_jobs_time = [0 for i in
+                                          range(
+                                              Job)]  # Eğer senkronize bir iş yapıldıysa, eşleniği olan iş için t değeri tutulur.
+                p_jk = copy.deepcopy(p_jj)  # senkronize iş parametresinin kopyası
+                undone_jobs = []  # TSP sonucunda yapılamayan işler bu listeye eklenir.
+
+                assigned_jobs = assign_jobs()
+                assigned_nurses_return = assign_nurses(assigned_jobs)
+                assigned_nurses = assigned_nurses_return[0]
+                assigned_jobs_vehicle = assigned_nurses_return[1]
+                sorted_vehicle_list = assigned_nurses_return[2]
+
+                for vehicle in sorted_vehicle_list:  # modelin başlangıcı
+                    returned_list = Tour_construct(Tour=Tour)
+                    Tour = returned_list[0]
+                    N = returned_list[1]
+                    V = returned_list[2]
+                    V_0 = returned_list[3]
+                    V_N = returned_list[4]
+                    J = returned_list[5]
+                    J_0 = returned_list[6]
+
+                    Solve_TSP_returned_list = Solve_TSP(Tour=Tour, N=N, V_N=V_N, V_0=V_0, V=V, J=J, J_0=J_0, S=S)
+                    TSP_solution = Solve_TSP_returned_list[0]
+                    Tour = Solve_TSP_returned_list[1]
+                    rota_olusturuldu_mu = Solve_TSP_returned_list[2]
+                    rota_olusturuldu_mu_hemsire = Solve_TSP_returned_list[3]
+                    Itertion_objective = Solve_TSP_returned_list[4]
+                    current_objective = sum(Itertion_objective)
+                if current_objective < best_found_solution:  # update solution
+                    best_found_solution = current_objective
+                    best_found_tour = copy.deepcopy(TSP_solution)
+                    best_found_assignment = copy.deepcopy(N)
+                    undone_jobs_final = copy.deepcopy(undone_jobs_iteration)
+                    assigned_nurses_final = copy.deepcopy(assigned_nurses)
+                    Itertion_objective_final = copy.deepcopy(Itertion_objective)
+                    synchronized_jobs_time_final = copy.deepcopy(synchronized_jobs_time)
+                    x_var_final = copy.deepcopy(x_var_iteration)
+                    t_var_final = copy.deepcopy(t_var_iteration)
+
+            # *************************************************************************************************************** #
+
+            Tour_Grasp = [[] for k in range(K)]
+
+            for vehicle in range(K):  # Tour Grasp'i bul
+                Tour_Grasp[vehicle].append(vehicle + 1)
+                for n in range(1 + D + Job + CS + D):
+                    for i in range(1, D + Job + CS + D + 1):
+                        for j in range(1, D + Job + CS + D + 1):
+                            if x_var_final[vehicle][j][i] > 0.9999999999 and i in Tour_Grasp[vehicle] and j not in \
+                                    Tour_Grasp[
+                                        vehicle]:
+                                Tour_Grasp[vehicle].append(j)
+                if len(Tour_Grasp[vehicle]) == 1:
+                    Tour_Grasp[vehicle].remove(vehicle + 1)
+
+
+            new_name=str(iteration10)+excel
+            wb1=openpyxl.load_workbook(f"C://Users//Monster//Desktop//40J50GRASP1.xlsx")
+            sheet1=wb1.create_sheet(new_name)
+            sheet1.cell(1, 1).value="Grasp Tour"
+            sheet1.cell(1, 2).value=str(Tour_Grasp)
+            best_found_solution = calculate_cost(Tour_Grasp, assigned_nurses_final)
+            sheet1.cell(2, 1).value="Grasp Cost"
+            sheet1.cell(2, 2).value=str(best_found_solution)
+            Time2=time.time()
+            sheet1.cell(3, 1).value="Grasp Time"
+            sheet1.cell(3, 2).value=str(Time2-Time1)
+
+
+            current_tour = Tour_Grasp
+            current_cost = calculate_cost(Tour_Grasp, assigned_nurses_final)
+
+            incumbent_tour = Tour_Grasp
+            incumbent_cost = current_cost
+            incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+
+            baslangıc_sicakligi = (0.5 * incumbent_cost) / math.log(2)
+            alpha = 0.99
+
+            local_search_weight = [1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7]
+            single_local_search_probability = [1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7]
+            score = [0, 0, 0, 0, 0, 0, 0]
+            p = 0.50
+            iteration = 0
+            max_non_improving_iteration = 0
+            max_iteration = 10000
+            adjustment_period = 25
+            shaking_period = 100
+            number_of_utilization = [0, 0, 0, 0, 0, 0, 0]
+
+            while iteration < max_iteration:
+                iteration += 1
+                max_non_improving_iteration += 1
+                neighborhood_structure = int(choice(range(0, 7), 1, p=single_local_search_probability))
+                if iteration % adjustment_period == 0:
+                    for i in range(7):
+                        if number_of_utilization[i] > 0:
+                            local_search_weight[i] = (1 - p) * local_search_weight[i] + p * score[i] / \
+                                                      number_of_utilization[i]
+                        else:
+                            local_search_weight[i] = (1 - p) * local_search_weight[i]
+                    single_local_search_probability = [local_search_weight[i] / sum(local_search_weight) for i in
+                                                       range(7)]
+                    number_of_utilization = [0 for i in range(7)]
+                    score = [0 for i in range(7)]
+                if max_non_improving_iteration % shaking_period ==0:
+                    number_of_job = random.randint(1,6)
+                    current_tour = shaking_remove_insert(number_of_job,incumbent_tour)
+                    assigned_nurses_final = copy.deepcopy(incumbent_assignment)
+                    current_cost = calculate_cost(current_tour, assigned_nurses_final)
+                if neighborhood_structure == 0:
+                    local_search_returned_list = local_search_remove_vehicle(current_tour)
+                    current_tour_local_search = local_search_returned_list[0]
+                    current_cost_local_search = local_search_returned_list[1]
+                    number_of_utilization[0] += 1
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        max_non_improving_iteration = 0
+                        score[0] += 70
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        score[0] += 20
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            score[0] += 35
+
+                elif neighborhood_structure == 1:
+                    local_search_returned_list = Local_search_remove_insert(current_tour)
+                    current_cost_local_search = local_search_returned_list[0]
+                    current_tour_local_search = local_search_returned_list[1]
+                    number_of_utilization[1] += 1
+
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        max_non_improving_iteration = 0
+                        score[1] += 70
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        score[1] += 50
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            score[1] += 20
+
+                elif neighborhood_structure == 2:
+                    local_search_returned_list = Local_search_swap_jobs(current_tour)
+                    current_cost_local_search = local_search_returned_list[0]
+                    current_tour_local_search = local_search_returned_list[1]
+                    number_of_utilization[2] += 1
+
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        baslangıc_sicakligi = baslangıc_sicakligi * alpha
+                        max_non_improving_iteration = 0
+                        score[2] += 70
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        score[2] += 50
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            score[2] += 20
+
+                elif neighborhood_structure == 3:
+                    local_search_returned_list = Local_search_insert_undone_jobs(current_tour)
+                    current_cost_local_search = local_search_returned_list[0]
+                    current_tour_local_search = local_search_returned_list[1]
+                    number_of_utilization[3] += 1
+
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        max_non_improving_iteration = 0
+                        score[3] += 70
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        score[3] += 50
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            score[3] += 20
+
+                elif neighborhood_structure == 4:
+                    local_search_returned_list = local_search_3_opt(current_tour)
+                    current_cost_local_search = local_search_returned_list[0]
+                    current_tour_local_search = local_search_returned_list[1]
+                    number_of_utilization[4] += 1
+
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        max_non_improving_iteration = 0
+                        score[4] += 70
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        score[4] += 50
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            score[4] += 20
+
+                elif neighborhood_structure == 5:
+                    local_search_swap_vehicles_returned_list = local_search_swap_vehicles(current_tour)
+                    current_cost_local_search = local_search_swap_vehicles_returned_list[0]
+                    current_tour_local_search = local_search_swap_vehicles_returned_list[1]
+                    assigned_nurses_local_search = local_search_swap_vehicles_returned_list[2]
+                    number_of_utilization[5] += 1
+
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        assigned_nurses_final = copy.deepcopy(assigned_nurses_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        max_non_improving_iteration = 0
+                        score[5] += 20
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        assigned_nurses_final = copy.deepcopy(assigned_nurses_local_search)
+                        score[5] += 20
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            assigned_nurses_final = copy.deepcopy(assigned_nurses_local_search)
+                            score[5] += 20
+
+                else:
+                    local_search_swap_nurses_returned_list = local_search_swap_nurses(current_tour)
+                    current_cost_local_search = local_search_swap_nurses_returned_list[0]
+                    current_tour_local_search = local_search_swap_nurses_returned_list[1]
+                    assigned_nurses_local_search = local_search_swap_nurses_returned_list[2]
+                    number_of_utilization[6] += 1
+
+                    if current_cost_local_search < incumbent_cost:
+                        incumbent_cost = current_cost_local_search
+                        incumbent_tour = copy.deepcopy(current_tour_local_search)
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        assigned_nurses_final = copy.deepcopy(assigned_nurses_local_search)
+                        incumbent_assignment = copy.deepcopy(assigned_nurses_final)
+                        max_non_improving_iteration = 0
+                        score[6] += 70
+
+                    elif current_cost_local_search < current_cost:
+                        current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                        current_cost = current_cost_local_search
+                        assigned_nurses_final = copy.deepcopy(assigned_nurses_local_search)
+                        score[6] += 50
+
+                    else:
+                        u = random.random()  # generate random number
+                        if u < math.exp((current_cost - current_cost_local_search) / baslangıc_sicakligi):
+                            current_tour = copy.deepcopy(current_tour_local_search)  # update the tour
+                            current_cost = current_cost_local_search
+                            assigned_nurses_final = copy.deepcopy(assigned_nurses_local_search)
+                            score[6] += 20
+                baslangıc_sicakligi = baslangıc_sicakligi * alpha
+                if max_non_improving_iteration > max_non_improving_iteration_parameter:
+                    break
+            sheet1.cell(4,1).value = "AVNS Tour"
+            sheet1.cell(4,2).value = str(incumbent_tour)
+            sheet1.cell(5,1).value = "AVNS Cost"
+            sheet1.cell(5,2).value = str(incumbent_cost)
+            Time3=time.time()
+            sheet1.cell(6,1).value = "GRASP+AVNS Time(seconds)"
+            sheet1.cell(6,2).value = str(Time3-Time2)
+            try:
+
+                incumbent_cost = calculate_cost_final(incumbent_tour, incumbent_assignment)
+                charging_time_final_returned_list = calculate_battery(incumbent_tour)
+                charging_time_final = charging_time_final_returned_list[0]
+                calculate_time_returned_list = calculate_time(charging_time_final, incumbent_tour)
+                travel_time = calculate_time_returned_list[0]
+                spare_time = calculate_time_returned_list[1]
+                total_job_dur = calculate_time_returned_list[2]
+
+                charging_time_vehicle = [0 for i in range(K)]
+                total_travelling_time = [0 for i in range(K)]
+                total_route_time = [0 for i in range(K)]
+                for i in range(K):
+                    charging_time_vehicle[i] = sum(charging_time_final[i])
+
+                for i in range(K):
+                    if len(travel_time[i]):
+                        total_route_time[i] = travel_time[i][-1] - travel_time[i][0]
+
+                for i in range(K):
+                    total_travelling_time[i] = total_route_time[i] - spare_time[i] - total_job_dur[i] - \
+                                               charging_time_vehicle[i]
+
+                count_non_empty_tour = 0
+
+                for i in range(K):
+                    if total_route_time[i] > 0:
+                        count_non_empty_tour += 1
+
+                avg_route_time = sum(total_route_time) / count_non_empty_tour
+                avg_spare_time = sum(spare_time) / count_non_empty_tour
+                avg_job_dur = sum(total_job_dur) / count_non_empty_tour
+                avg_charging_time = sum(charging_time_vehicle) / count_non_empty_tour
+                avg_travel_time = sum(total_travelling_time) / count_non_empty_tour
+
+                sheet1.cell(7,1).value="Total Route Time"
+                sheet1.cell(7,2).value=str(total_route_time)
+                sheet1.cell(8,1).value="Total Spare Time"
+                sheet1.cell(8,2).value=str(spare_time)
+                sheet1.cell(9,1).value="Total Job Duration"
+                sheet1.cell(9,2).value=str(total_job_dur)
+                sheet1.cell(10,1).value="Total Charging Time"
+                sheet1.cell(10,2).value=str(charging_time_vehicle)
+                sheet1.cell(11,1).value="Total Travel Time"
+                sheet1.cell(11,2).value=str(total_travelling_time)
+                sheet1.cell(12,1).value="Average Route Time"
+                sheet1.cell(12,2).value=str(avg_route_time)
+                sheet1.cell(13,1).value="Average Spare Time"
+                sheet1.cell(13,2).value=str(avg_spare_time)
+                sheet1.cell(14,1).value="Average Job Duration"
+                sheet1.cell(14,2).value=str(avg_job_dur)
+                sheet1.cell(15,1).value="Average Charging Time"
+                sheet1.cell(15,2).value=str(avg_charging_time)
+                sheet1.cell(16,1).value="Average Travel Time"
+                sheet1.cell(16,2).value=str(avg_travel_time)
+                wb1.save(f"C://Users//Monster//Desktop//40J50GRASP1.xlsx")
+
+            except TypeError:
+                sheet1.cell(17,1).value="Hatalı Distance Matrisi"
+                wb1.save(f"C://Users//Monster//Desktop//40J50GRASP1.xlsx")
+                continue
